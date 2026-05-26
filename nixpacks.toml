@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["php82", "php82Extensions.pdo", "php82Extensions.pdo_mysql", "php82Extensions.mbstring", "php82Extensions.fileinfo"]
+nixPkgs = ["php82", "php82Extensions.pdo_mysql", "php82Extensions.mbstring", "php82Extensions.fileinfo", "php82Extensions.gd"]
 
 [start]
-cmd = "cp config.railway.php config.php && php -S 0.0.0.0:$PORT"
+cmd = "cp config.railway.php config.php && php -S 0.0.0.0:8080"
