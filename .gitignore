@@ -1,4 +1,39 @@
+# Sensitive config
 config.php
-assets/uploads/
-*.log
 .env
+*.env
+
+# Uploads
+assets/uploads/
+
+# Logs
+*.log
+logs/
+
+# Database dumps (don't commit these)
+*.sql.bak
+*.dump
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# PHP dependencies (if you ever add Composer)
+vendor/
+composer.lock
+
+# Node (if you ever add npm)
+node_modules/
+package-lock.json
+
+# Temp files
+*.tmp
+*.temp
+/tmp/
