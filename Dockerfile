@@ -9,4 +9,4 @@ RUN cp config.railway.php config.php
 
 EXPOSE 8080
 
-CMD ["php", "-S", "0.0.0.0:8080"]
+CMD sh -c "php -S 0.0.0.0:${PORT:-8080}"
