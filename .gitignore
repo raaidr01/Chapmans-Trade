@@ -4,7 +4,9 @@ config.php
 *.env
 
 # Uploads
-assets/uploads/
+assets/uploads/**/*.php
+assets/uploads/**/*.phtml
+assets/uploads/**/*.phar
 
 # Logs
 *.log
