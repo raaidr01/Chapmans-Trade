@@ -44,41 +44,32 @@ if ($editing) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf_or_redirect($editing ? url('seller/listing_form.php?id=' . (string) $listingId) : url('seller/listing_form.php'));
 
+    $imageUrl = trim($_POST['image_url'] ?? '');
     $currentImageUrl = trim($_POST['current_image_url'] ?? $currentImageUrl);
+
     $listing = [
         'title' => trim($_POST['title'] ?? ''),
         'category_id' => (int) ($_POST['category_id'] ?? 0),
         'price' => trim($_POST['price'] ?? ''),
         'stock_quantity' => (int) ($_POST['stock_quantity'] ?? 1),
         'item_condition' => $_POST['item_condition'] ?? 'used',
-        'image_url' => $currentImageUrl,
+        'image_url' => $imageUrl !== '' ? $imageUrl : $currentImageUrl,
         'description' => trim($_POST['description'] ?? ''),
         'status' => $_POST['status'] ?? 'active',
     ];
-    $uploadedImageUrl = null;
 
-    try {
-        $uploadedImageUrl = process_listing_image_upload('image_file');
-    } catch (RuntimeException $exception) {
-        $errors[] = $exception->getMessage();
-    }
-
-    if ($uploadedImageUrl !== null) {
-        $listing['image_url'] = $uploadedImageUrl;
+    // Validate image URL if provided
+    if ($imageUrl !== '' && !filter_var($imageUrl, FILTER_VALIDATE_URL)) {
+        $errors[] = 'Please enter a valid image URL (must start with http:// or https://).';
+        $listing['image_url'] = $currentImageUrl;
     }
 
     if ($listing['title'] === '' || $listing['category_id'] === 0 || $listing['price'] === '' || $listing['image_url'] === '' || $listing['description'] === '') {
-        $errors[] = 'Please complete all required fields.';
+        $errors[] = 'Please complete all required fields including an image URL.';
     }
-
 
     if ($listing['stock_quantity'] < 1) {
         $errors[] = 'Stock quantity must be at least 1.';
-    }
-
-    if ($errors !== [] && $uploadedImageUrl !== null) {
-        delete_local_upload_if_present($uploadedImageUrl);
-        $listing['image_url'] = $currentImageUrl;
     }
 
     if ($errors === []) {
@@ -122,16 +113,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 flash('success', 'Listing created successfully.');
             }
 
-            if ($listing['image_url'] !== $currentImageUrl) {
-                delete_local_upload_if_present($currentImageUrl);
-            }
-
             redirect(url('seller/dashboard.php'));
         } catch (Throwable $exception) {
-            if ($uploadedImageUrl !== null) {
-                delete_local_upload_if_present($uploadedImageUrl);
-            }
-
             log_application_exception($exception, 'listing_form');
             $errors[] = 'We could not save your listing right now. Please try again.';
         }
@@ -150,7 +133,7 @@ require __DIR__ . '/../partials/header.php';
         <?php if ($errors !== []): ?>
             <div class="flash flash-error"><?= e(implode(' ', $errors)) ?></div>
         <?php endif; ?>
-        <form class="stack-form two-column" method="post" enctype="multipart/form-data">
+        <form class="stack-form two-column" method="post">
             <?= csrf_field() ?>
             <input type="hidden" name="current_image_url" value="<?= e($currentImageUrl) ?>">
             <label>
@@ -193,9 +176,9 @@ require __DIR__ . '/../partials/header.php';
                 </select>
             </label>
             <label class="full-span">
-                Upload image from device
-                <input type="file" name="image_file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp">
-                <small class="field-note">Allowed types: JPG, PNG, WEBP. Maximum size: 2 MB. When editing, your current image stays in place until you upload a replacement.</small>
+                Image URL
+                <input type="url" name="image_url" value="<?= e($currentImageUrl) ?>" placeholder="https://example.com/image.jpg" <?= $editing ? '' : 'required' ?>>
+                <small class="field-note">Paste a direct image URL (must start with https://). Use image hosting sites like Imgur (imgur.com) to get a direct link. <?= $editing ? 'Leave blank to keep the current image.' : '' ?></small>
             </label>
             <?php if ($currentImageUrl !== ''): ?>
                 <div class="full-span listing-preview">
