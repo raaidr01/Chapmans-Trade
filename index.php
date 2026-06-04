@@ -27,16 +27,16 @@ require __DIR__ . '/partials/header.php';
     <div class="container hero-grid">
         <div>
             <span class="eyebrow">Designed for the South African informal economy</span>
-            <h1>Buy and sell everyday goods with safer township-friendly commerce.</h1>
+            <h1>BUY & SELL EVERYDAY GOODS</h1>
             <p class="hero-copy">Chapmans Trade helps local customers list furniture, fashion, electronics, and household items with verified seller badges, low-data pages, and simple checkout flows.</p>
             <div class="hero-actions">
                 <a class="button" href="<?= e(url('catalog.php')) ?>">Start shopping</a>
                 <a class="button button-secondary" href="<?= e(url('seller/dashboard.php')) ?>">Start selling</a>
             </div>
             <div class="hero-trust">
-                <span>Trusted by local side-hustlers</span>
-                <span>ZAR pricing</span>
-                <span>Pickup or courier</span>
+                <h3>Trusted by local side-hustlers</h3>
+                <h3>ZAR pricing</h3>
+                <h3>Pickup or courier</h3>
             </div>
         </div>
         <div class="hero-card">
