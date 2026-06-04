@@ -19,7 +19,6 @@
         </div>
         <div class="container footer-bottom">
             <span>&copy; <?= e(current_year()) ?> <?= e(APP_NAME) ?></span>
-            <span>Built with HTML, CSS, JavaScript, PHP and MySQL</span>
         </div>
     </footer>
 
