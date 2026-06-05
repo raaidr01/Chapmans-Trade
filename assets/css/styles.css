@@ -38,8 +38,9 @@ a {
 }
 
 .container {
-    width: min(1120px, calc(100% - 2rem));
+    width: min(1120px, 100%);
     margin: 0 auto;
+    padding: 0 1rem;
 }
 
 .site-header {
