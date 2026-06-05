@@ -1,15 +1,15 @@
 FROM php:8.4-cli
 
+# Install PHP extensions
 RUN docker-php-ext-install pdo pdo_mysql
+
+# Install curl extension for Stripe API calls
+RUN apt-get update && apt-get install -y libcurl4-openssl-dev && \
+    docker-php-ext-install curl && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . .
 RUN cp config.railway.php config.php
 
-# Prevent PHP execution in uploads folder
-RUN mkdir -p assets/uploads/listings && \
-    echo "<?php http_response_code(403); exit; ?>" > assets/uploads/listings/index.php && \
-    chmod 755 assets/uploads/listings
-
-EXPOSE 8080
-CMD sh -c 'php -S 0.0.0.0:$PORT'
+CMD php -S 0.0.0.0:$PORT

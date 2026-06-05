@@ -12,14 +12,28 @@ if ($totals['rows'] === []) {
     redirect(url('catalog.php'));
 }
 
+// ── Handle Stripe success callback ────────────────────────────────────────
+if (isset($_GET['stripe_success'], $_GET['order_ref'])) {
+    $orderRef = preg_replace('/[^A-Z0-9\-]/', '', strtoupper($_GET['order_ref']));
+    flash('success', 'Payment successful. Order reference: ' . $orderRef . '.');
+    clear_cart();
+    redirect(url('orders.php'));
+}
+
+// ── Handle Stripe cancel callback ─────────────────────────────────────────
+if (isset($_GET['stripe_cancel'])) {
+    flash('error', 'Payment was cancelled. Your cart is still saved.');
+    redirect(url('checkout.php'));
+}
+
 $errors = [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf_or_redirect(url('checkout.php'));
 
-    $deliveryMethod = $_POST['delivery_method'] ?? '';
+    $deliveryMethod  = $_POST['delivery_method'] ?? '';
     $deliveryAddress = trim($_POST['delivery_address'] ?? '');
-    $paymentMethod = $_POST['payment_method'] ?? '';
+    $paymentMethod   = $_POST['payment_method'] ?? '';
 
     if (!in_array($deliveryMethod, ['pickup', 'courier'], true)) {
         $errors[] = 'Please choose a delivery method.';
@@ -29,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = 'Please provide a delivery address.';
     }
 
-    if (!in_array($paymentMethod, ['eft', 'cash_on_collection', 'card_demo'], true)) {
+    if (!in_array($paymentMethod, ['stripe', 'cash_on_collection'], true)) {
         $errors[] = 'Please choose a payment method.';
     }
 
@@ -38,9 +52,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pdo->beginTransaction();
 
         try {
-            $user = current_user();
-            $orderReference = generate_order_reference();
-            $paymentStatus = $paymentMethod === 'cash_on_collection' ? 'pending' : 'paid';
+            $user             = current_user();
+            $orderReference   = generate_order_reference();
+            $paymentStatus    = $paymentMethod === 'cash_on_collection' ? 'pending' : 'pending';
 
             $orderStmt = $pdo->prepare(
                 'INSERT INTO orders (
@@ -52,27 +66,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                  )'
             );
             $orderStmt->execute([
-                'buyer_id' => $user['id'],
-                'order_reference' => $orderReference,
-                'subtotal' => $totals['subtotal'],
-                'delivery_fee' => $totals['delivery'],
-                'total_amount' => $totals['total'],
-                'delivery_method' => $deliveryMethod,
+                'buyer_id'         => $user['id'],
+                'order_reference'  => $orderReference,
+                'subtotal'         => $totals['subtotal'],
+                'delivery_fee'     => $totals['delivery'],
+                'total_amount'     => $totals['total'],
+                'delivery_method'  => $deliveryMethod,
                 'delivery_address' => $deliveryAddress,
-                'payment_method' => $paymentMethod,
-                'payment_status' => $paymentStatus,
-                'order_status' => 'processing',
+                'payment_method'   => $paymentMethod,
+                'payment_status'   => $paymentStatus,
+                'order_status'     => 'processing',
             ]);
 
-            $orderId = (int) $pdo->lastInsertId();
-            $itemStmt = $pdo->prepare(
+            $orderId   = (int) $pdo->lastInsertId();
+            $itemStmt  = $pdo->prepare(
                 'INSERT INTO order_items (order_id, listing_id, seller_id, quantity, unit_price, item_title, item_image_url, seller_name)
                  VALUES (:order_id, :listing_id, :seller_id, :quantity, :unit_price, :item_title, :item_image_url, :seller_name)'
             );
             $stockStmt = $pdo->prepare(
                 'UPDATE listings
-                 SET stock_quantity = stock_quantity - :stock_quantity_to_deduct,
-                     status = CASE WHEN stock_quantity - :stock_quantity_for_status <= 0 THEN "sold" ELSE status END
+                 SET stock_quantity = stock_quantity - :qty_deduct,
+                     status = CASE WHEN stock_quantity - :qty_status <= 0 THEN "sold" ELSE status END
                  WHERE id = :id'
             );
             $paymentStmt = $pdo->prepare(
@@ -89,59 +103,132 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($listing === null) {
                     throw new RuntimeException('One of the selected listings is no longer available.');
                 }
-
-                 if ((int) $row['quantity'] > (int) $listing['stock_quantity']) {
+                if ((int) $row['quantity'] > (int) $listing['stock_quantity']) {
                     throw new RuntimeException('One of the selected quantities is no longer in stock.');
                 }
 
                 $itemStmt->execute([
-                    'order_id' => $orderId,
-                    'listing_id' => $row['id'],
-                    'seller_id' => $listing['user_id'],
-                    'quantity' => $row['quantity'],
-                    'unit_price' => $row['price'],
-                    'item_title' => $row['title'],
-                    'item_image_url' => $listing['image_url'],
-                    'seller_name' => $listing['seller_name'],
+                    'order_id'      => $orderId,
+                    'listing_id'    => $row['id'],
+                    'seller_id'     => $listing['user_id'],
+                    'quantity'      => $row['quantity'],
+                    'unit_price'    => $row['price'],
+                    'item_title'    => $row['title'],
+                    'item_image_url'=> $listing['image_url'],
+                    'seller_name'   => $listing['seller_name'],
                 ]);
 
                 $stockStmt->execute([
-                    'stock_quantity_to_deduct' => $row['quantity'],
-                    'stock_quantity_for_status' => $row['quantity'],
-                    'id' => $row['id'],
+                    'qty_deduct' => $row['quantity'],
+                    'qty_status' => $row['quantity'],
+                    'id'         => $row['id'],
                 ]);
             }
 
             $paymentStmt->execute([
-                'order_id' => $orderId,
-                'amount' => $totals['total'],
-                'payment_method' => $paymentMethod,
-                'gateway_name' => $paymentMethod === 'eft'
-                    ? 'Instant EFT Demo'
-                    : ($paymentMethod === 'card_demo' ? 'Card Sandbox' : 'Cash On Collection'),
+                'order_id'              => $orderId,
+                'amount'                => $totals['total'],
+                'payment_method'        => $paymentMethod,
+                'gateway_name'          => $paymentMethod === 'stripe' ? 'Stripe' : 'Cash On Collection',
                 'transaction_reference' => $orderReference . '-PAY',
-                'status' => $paymentStatus,
-                'paid_at' => $paymentStatus === 'paid' ? date('Y-m-d H:i:s') : null,
+                'status'                => $paymentStatus,
+                'paid_at'               => null,
             ]);
 
             $historyStmt->execute([
-                'order_id' => $orderId,
-                'status' => 'processing',
-                'note' => $deliveryMethod === 'pickup'
+                'order_id'           => $orderId,
+                'status'             => 'processing',
+                'note'               => $deliveryMethod === 'pickup'
                     ? 'Order placed and awaiting seller confirmation for collection.'
                     : 'Order placed and queued for courier coordination.',
                 'changed_by_user_id' => $user['id'],
             ]);
 
             $pdo->commit();
-            clear_cart();
+
+            // ── Redirect to Stripe Checkout ────────────────────────────
+            if ($paymentMethod === 'stripe') {
+                $stripeKey = getenv('STRIPE_SECRET_KEY') ?: '';
+
+                if ($stripeKey === '') {
+                    flash('error', 'Stripe is not configured. Please contact support.');
+                    redirect(url('orders.php'));
+                }
+
+                $baseUrl     = (isset($_SERVER['HTTPS']) ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'];
+                $successUrl  = $baseUrl . '/orders.php?stripe_success=1&order_ref=' . urlencode($orderReference);
+                $cancelUrl   = $baseUrl . '/checkout.php?stripe_cancel=1';
+
+                $lineItems = [];
+                foreach ($totals['rows'] as $row) {
+                    $lineItems[] = [
+                        'price_data' => [
+                            'currency'     => 'zar',
+                            'product_data' => ['name' => $row['title']],
+                            'unit_amount'  => (int) round((float) $row['price'] * 100),
+                        ],
+                        'quantity' => (int) $row['quantity'],
+                    ];
+                }
+
+                if ($totals['delivery'] > 0) {
+                    $lineItems[] = [
+                        'price_data' => [
+                            'currency'     => 'zar',
+                            'product_data' => ['name' => 'Delivery fee'],
+                            'unit_amount'  => (int) round((float) $totals['delivery'] * 100),
+                        ],
+                        'quantity' => 1,
+                    ];
+                }
+
+                $payload = json_encode([
+                    'payment_method_types' => ['card'],
+                    'line_items'           => $lineItems,
+                    'mode'                 => 'payment',
+                    'success_url'          => $successUrl,
+                    'cancel_url'           => $cancelUrl,
+                    'client_reference_id'  => $orderReference,
+                ]);
+
+                $ch = curl_init('https://api.stripe.com/v1/checkout/sessions');
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_POST           => true,
+                    CURLOPT_POSTFIELDS     => $payload,
+                    CURLOPT_HTTPHEADER     => [
+                        'Authorization: Bearer ' . $stripeKey,
+                        'Content-Type: application/json',
+                        'Stripe-Version: 2024-06-20',
+                    ],
+                ]);
+                $response = curl_exec($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_close($ch);
+
+                $session = json_decode((string) $response, true);
+
+                if ($httpCode === 200 && isset($session['url'])) {
+                    header('Location: ' . $session['url']);
+                    exit;
+                }
+
+                log_application_exception(
+                    new RuntimeException('Stripe session creation failed: ' . ($response ?: 'no response')),
+                    'stripe_checkout'
+                );
+                flash('error', 'Could not connect to payment gateway. Your order is saved — please contact support with reference: ' . $orderReference);
+                redirect(url('orders.php'));
+            }
+
+            // ── Cash on collection ─────────────────────────────────────
             flash('success', 'Order placed successfully. Reference: ' . $orderReference . '.');
             redirect(url('orders.php'));
+
         } catch (Throwable $exception) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
             }
-
             log_application_exception($exception, 'checkout');
             $errors[] = 'We could not place your order right now. Please try again.';
         }
@@ -183,11 +270,13 @@ require __DIR__ . '/partials/header.php';
                     Payment method
                     <select name="payment_method" required>
                         <option value="">Choose one</option>
-                        <option value="eft">Instant EFT</option>
+                        <option value="stripe">Pay by card (Stripe)</option>
                         <option value="cash_on_collection">Cash on collection</option>
-                        <option value="card_demo">Card payment demo</option>
                     </select>
                 </label>
+                <div class="stripe-note">
+                    <small>Card payments are processed securely by Stripe. You will be redirected to complete payment.</small>
+                </div>
                 <button class="button" type="submit">Place order</button>
             </form>
         </div>
@@ -195,13 +284,20 @@ require __DIR__ . '/partials/header.php';
         <aside class="summary-card">
             <h2>Order summary</h2>
             <?php foreach ($totals['rows'] as $row): ?>
-                <div class="summary-line"><span><?= e($row['title']) ?> x <?= e((string) $row['quantity']) ?></span><strong><?= e(format_currency((float) $row['subtotal'])) ?></strong></div>
+                <div class="summary-line">
+                    <span><?= e($row['title']) ?> x <?= e((string) $row['quantity']) ?></span>
+                    <strong><?= e(format_currency((float) $row['subtotal'])) ?></strong>
+                </div>
             <?php endforeach; ?>
-            <div class="summary-line"><span>Delivery</span><strong><?= $totals['delivery'] > 0 ? e(format_currency((float) $totals['delivery'])) : 'Free' ?></strong></div>
-            <div class="summary-line summary-total"><span>Total</span><strong><?= e(format_currency((float) $totals['total'])) ?></strong></div>
+            <div class="summary-line">
+                <span>Delivery</span>
+                <strong><?= $totals['delivery'] > 0 ? e(format_currency((float) $totals['delivery'])) : 'Free' ?></strong>
+            </div>
+            <div class="summary-line summary-total">
+                <span>Total</span>
+                <strong><?= e(format_currency((float) $totals['total'])) ?></strong>
+            </div>
         </aside>
     </div>
 </section>
 <?php require __DIR__ . '/partials/footer.php'; ?>
-
-

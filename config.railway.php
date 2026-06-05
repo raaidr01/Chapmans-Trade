@@ -19,9 +19,9 @@ $secureCookie = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
 session_name('chapmans_trade_session');
 session_set_cookie_params([
     'lifetime' => 0,
-    'path' => '/',
-    'domain' => '',
-    'secure' => $secureCookie,
+    'path'     => '/',
+    'domain'   => '',
+    'secure'   => $secureCookie,
     'httponly' => true,
     'samesite' => 'Lax',
 ]);
@@ -36,7 +36,7 @@ if (!headers_sent()) {
     header('Referrer-Policy: strict-origin-when-cross-origin');
     header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
     header('Cross-Origin-Opener-Policy: same-origin');
-    header("Content-Security-Policy: default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'");
+    header("Content-Security-Policy: default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self' https://js.stripe.com; base-uri 'self'; form-action 'self' https://checkout.stripe.com; frame-ancestors 'none'; object-src 'none'");
 }
 
 define('APP_NAME', 'Chapmans Trade');
