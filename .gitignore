@@ -3,10 +3,21 @@ config.php
 .env
 *.env
 
-# Uploads
-assets/uploads/**/*.php
-assets/uploads/**/*.phtml
-assets/uploads/**/*.phar
+# Stripe and payment keys
+*.pem
+*.key
+
+# Brief and assignment files
+brief.zip
+brief_check/
+_brief_extract/
+
+# Uploads — use external URLs (Imgur/Unsplash) on Railway
+assets/uploads/listings/*.jpg
+assets/uploads/listings/*.jpeg
+assets/uploads/listings/*.png
+assets/uploads/listings/*.webp
+assets/uploads/listings/*.gif
 
 # Logs
 *.log
