@@ -12,21 +12,21 @@ if ($totals['rows'] === []) {
     redirect(url('catalog.php'));
 }
 
-// ── Handle Stripe success callback ────────────────────────────────────────
+// ── Stripe success callback ────────────────────────────────────────────────
 if (isset($_GET['stripe_success'], $_GET['order_ref'])) {
-    $orderRef = preg_replace('/[^A-Z0-9\-]/', '', strtoupper((string)$_GET['order_ref']));
+    $orderRef = preg_replace('/[^A-Z0-9\-]/', '', strtoupper((string) $_GET['order_ref']));
     flash('success', 'Payment successful. Order reference: ' . $orderRef . '.');
     clear_cart();
     redirect(url('orders.php'));
 }
 
-// ── Handle Stripe cancel callback ─────────────────────────────────────────
+// ── Stripe cancel callback ─────────────────────────────────────────────────
 if (isset($_GET['stripe_cancel'])) {
     flash('error', 'Payment was cancelled. Your cart is still saved.');
     redirect(url('checkout.php'));
 }
 
-$errors = [];
+$errors        = [];
 $deliveryMethod  = '';
 $deliveryAddress = '';
 $paymentMethod   = '';
@@ -38,132 +38,208 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $deliveryAddress = trim($_POST['delivery_address'] ?? '');
     $paymentMethod   = $_POST['payment_method'] ?? '';
 
-    // Data Whitelisting
     if (!in_array($deliveryMethod, ['pickup', 'courier'], true)) {
-        $errors[] = 'Please select a valid delivery method.';
+        $errors[] = 'Please choose a delivery method.';
     }
-
     if ($deliveryMethod === 'courier' && $deliveryAddress === '') {
-        $errors[] = 'A delivery address is required for courier delivery.';
+        $errors[] = 'Please provide a delivery address for courier orders.';
     }
-
     if (!in_array($paymentMethod, ['stripe', 'cash_on_collection'], true)) {
-        $errors[] = 'Please select a valid payment method.';
+        $errors[] = 'Please choose a payment method.';
     }
 
     if ($errors === []) {
+        $pdo = db();
+        $pdo->beginTransaction();
+
         try {
-            $db = db();
-            $db->beginTransaction();
+            $user           = current_user();
+            $orderReference = generate_order_reference();
 
-            $user = current_user();
-            // Generate unique, clean alphanumeric order reference safe for URL routing
-            $orderReference = 'CT-' . strtoupper(bin2hex(random_bytes(4)));
-
-            // 1. Create Core Order Record
-            $stmt = $db->prepare('
-                INSERT INTO orders (buyer_id, order_reference, total_amount, delivery_method, delivery_address, payment_method, payment_status, order_status, created_at)
-                VALUES (:buyer_id, :order_reference, :total_amount, :delivery_method, :delivery_address, :payment_method, :payment_status, "processing", NOW())
-            ');
-            
-            $paymentStatus = ($paymentMethod === 'stripe') ? 'pending' : 'unpaid';
-            $finalAddress  = ($deliveryMethod === 'courier') ? $deliveryAddress : 'Community Pickup Point';
-            
-            $stmt->execute([
-                'buyer_id'        => $user['id'],
-                'order_reference' => $orderReference,
-                'total_amount'    => $totals['total'],
-                'delivery_method' => $deliveryMethod,
-                'delivery_address'=> $finalAddress,
-                'payment_method'  => $paymentMethod,
-                'payment_status'  => $paymentStatus
+            // 1. Insert order
+            $orderStmt = $pdo->prepare(
+                'INSERT INTO orders (
+                    buyer_id, order_reference, subtotal, delivery_fee, total_amount,
+                    delivery_method, delivery_address, payment_method, payment_status, order_status
+                 ) VALUES (
+                    :buyer_id, :order_reference, :subtotal, :delivery_fee, :total_amount,
+                    :delivery_method, :delivery_address, :payment_method, :payment_status, "processing"
+                 )'
+            );
+            $orderStmt->execute([
+                'buyer_id'         => $user['id'],
+                'order_reference'  => $orderReference,
+                'subtotal'         => $totals['subtotal'],
+                'delivery_fee'     => $totals['delivery'],
+                'total_amount'     => $totals['total'],
+                'delivery_method'  => $deliveryMethod,
+                'delivery_address' => $deliveryMethod === 'courier' ? $deliveryAddress : null,
+                'payment_method'   => $paymentMethod,
+                'payment_status'   => 'pending',
             ]);
+            $orderId = (int) $pdo->lastInsertId();
 
-            $orderId = (int)$db->lastInsertId();
+            // 2. Insert order items and deduct stock
+            $itemStmt = $pdo->prepare(
+                'INSERT INTO order_items (order_id, listing_id, seller_id, quantity, unit_price, item_title, item_image_url, seller_name)
+                 VALUES (:order_id, :listing_id, :seller_id, :quantity, :unit_price, :item_title, :item_image_url, :seller_name)'
+            );
+            $stockStmt = $pdo->prepare(
+                'UPDATE listings
+                 SET stock_quantity = stock_quantity - :qty,
+                     status = CASE WHEN stock_quantity - :qty2 <= 0 THEN "sold" ELSE status END
+                 WHERE id = :id AND stock_quantity >= :qty3'
+            );
 
-            // 2. Map Items and Perform Stock Lock Validations
             foreach ($totals['rows'] as $row) {
-                // Read-lock rows to protect against multi-user race conditions
-                $stockCheck = $db->prepare('SELECT stock_quantity, status FROM listings WHERE id = :id FOR UPDATE');
-                $stockCheck->execute(['id' => $row['id']]);
-                $listing = $stockCheck->fetch();
-
-                if (!$listing || $listing['status'] !== 'active' || (int)$listing['stock_quantity'] < (int)$row['quantity']) {
-                    throw new Exception('One or more items in your cart became unavailable. Please update your cart.');
+                // Re-fetch with user_id (seller) — get_cart_listing_rows() doesn't include it
+                $listing = get_listing_by_id((int) $row['id']);
+                if ($listing === null) {
+                    throw new RuntimeException('A listing in your cart is no longer available.');
+                }
+                if ((int) $listing['stock_quantity'] < (int) $row['quantity']) {
+                    throw new RuntimeException('"' . $listing['title'] . '" has insufficient stock.');
                 }
 
-                // Add item row to historical record logs
-                $itemStmt = $db->prepare('
-                    INSERT INTO order_items (order_id, listing_id, seller_id, quantity, unit_price, subtotal)
-                    VALUES (:order_id, :listing_id, :seller_id, :quantity, :unit_price, :subtotal)
-                ');
                 $itemStmt->execute([
-                    'order_id'   => $orderId,
-                    'listing_id' => $row['id'],
-                    'seller_id'  => $row['user_id'] ?? $row['seller_id'] ?? null, 
-                    'quantity'   => $row['quantity'],
-                    'unit_price' => $row['price'],
-                    'subtotal'   => $row['subtotal']
+                    'order_id'      => $orderId,
+                    'listing_id'    => $row['id'],
+                    'seller_id'     => $listing['user_id'],
+                    'quantity'      => $row['quantity'],
+                    'unit_price'    => $row['price'],
+                    'item_title'    => $row['title'],
+                    'item_image_url'=> $listing['image_url'],
+                    'seller_name'   => $listing['seller_name'],
                 ]);
 
-                // Reduce Inventory State atomically
-                $updateStock = $db->prepare('UPDATE listings SET stock_quantity = stock_quantity - :qty WHERE id = :id');
-                $updateStock->execute([
-                    'qty' => $row['quantity'],
-                    'id'  => $row['id']
+                $affected = $stockStmt->execute([
+                    'qty'  => $row['quantity'],
+                    'qty2' => $row['quantity'],
+                    'qty3' => $row['quantity'],
+                    'id'   => $row['id'],
                 ]);
-
-                // Update catalog listing visibility if depleted
-                $finalStockCheck = $db->prepare('SELECT stock_quantity FROM listings WHERE id = :id');
-                $finalStockCheck->execute(['id' => $row['id']]);
-                if ((int)$finalStockCheck->fetchColumn() <= 0) {
-                    $markSold = $db->prepare('UPDATE listings SET status = "sold" WHERE id = :id');
-                    $markSold->execute(['id' => $row['id']]);
+                if ($stockStmt->rowCount() === 0) {
+                    throw new RuntimeException('Stock update failed for "' . $row['title'] . '". Please refresh your cart.');
                 }
             }
 
-            // Record initial lifecycle status audit entry
-            $historyStmt = $db->prepare('
-                INSERT INTO order_status_history (order_id, status, note, created_at)
-                VALUES (:order_id, "processing", "Order successfully generated through secure checkout pipeline.", NOW())
-            ');
-            $historyStmt->execute(['order_id' => $orderId]);
+            // 3. Payment record
+            $pdo->prepare(
+                'INSERT INTO payments (order_id, amount, payment_method, gateway_name, transaction_reference, status, paid_at)
+                 VALUES (:order_id, :amount, :payment_method, :gateway_name, :transaction_reference, "pending", NULL)'
+            )->execute([
+                'order_id'              => $orderId,
+                'amount'                => $totals['total'],
+                'payment_method'        => $paymentMethod,
+                'gateway_name'          => $paymentMethod === 'stripe' ? 'Stripe' : 'Cash On Collection',
+                'transaction_reference' => $orderReference . '-PAY',
+            ]);
 
-            $db->commit();
+            // 4. Status history
+            $pdo->prepare(
+                'INSERT INTO order_status_history (order_id, status, note, changed_by_user_id)
+                 VALUES (:order_id, "processing", :note, :user_id)'
+            )->execute([
+                'order_id' => $orderId,
+                'note'     => $paymentMethod === 'stripe'
+                    ? 'Order placed, awaiting Stripe payment.'
+                    : 'Order placed via cash on collection.',
+                'user_id'  => $user['id'],
+            ]);
 
-            // 3. Routing Layer Gateway Control
+            $pdo->commit();
+
+            // 5. Stripe redirect
             if ($paymentMethod === 'stripe') {
-                if (function_exists('generate_stripe_checkout_session')) {
-                    generate_stripe_checkout_session($orderId, $orderReference, $totals['total']);
-                } else {
-                    // Simulation fallback for sandboxed local-testing matching callbacks
-                    redirect(url('checkout.php?stripe_success=true&order_ref=' . $orderReference));
+                $stripeKey = getenv('STRIPE_SECRET_KEY') ?: '';
+                if ($stripeKey === '') {
+                    flash('error', 'Stripe is not configured. Contact support. Reference: ' . $orderReference);
+                    redirect(url('orders.php'));
                 }
-            } else {
-                flash('success', 'Order successfully placed via Cash on Collection! Reference: ' . $orderReference);
-                clear_cart();
+
+                $host       = $_SERVER['HTTP_HOST'] ?? '';
+                $proto      = (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') ? 'https' : 'http';
+                $baseUrl    = $proto . '://' . $host;
+                $successUrl = $baseUrl . '/orders.php?stripe_success=1&order_ref=' . urlencode($orderReference);
+                $cancelUrl  = $baseUrl . '/checkout.php?stripe_cancel=1';
+
+                $postFields = [
+                    'payment_method_types[0]' => 'card',
+                    'mode'                    => 'payment',
+                    'success_url'             => $successUrl,
+                    'cancel_url'              => $cancelUrl,
+                    'client_reference_id'     => $orderReference,
+                ];
+
+                $i = 0;
+                foreach ($totals['rows'] as $row) {
+                    $postFields["line_items[{$i}][price_data][currency]"]               = 'zar';
+                    $postFields["line_items[{$i}][price_data][product_data][name]"]     = $row['title'];
+                    $postFields["line_items[{$i}][price_data][unit_amount]"]            = (int) round((float) $row['price'] * 100);
+                    $postFields["line_items[{$i}][quantity]"]                           = (int) $row['quantity'];
+                    $i++;
+                }
+                if ($totals['delivery'] > 0) {
+                    $postFields["line_items[{$i}][price_data][currency]"]               = 'zar';
+                    $postFields["line_items[{$i}][price_data][product_data][name]"]     = 'Delivery fee';
+                    $postFields["line_items[{$i}][price_data][unit_amount]"]            = (int) round((float) $totals['delivery'] * 100);
+                    $postFields["line_items[{$i}][quantity]"]                           = 1;
+                }
+
+                $ch = curl_init('https://api.stripe.com/v1/checkout/sessions');
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_POST           => true,
+                    CURLOPT_POSTFIELDS     => http_build_query($postFields),
+                    CURLOPT_HTTPHEADER     => [
+                        'Authorization: Bearer ' . $stripeKey,
+                        'Content-Type: application/x-www-form-urlencoded',
+                        'Stripe-Version: 2024-06-20',
+                    ],
+                ]);
+                $response = curl_exec($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_close($ch);
+
+                $session = json_decode((string) $response, true);
+
+                if ($httpCode === 200 && isset($session['url'])) {
+                    header('Location: ' . $session['url']);
+                    exit;
+                }
+
+                log_application_exception(
+                    new RuntimeException('Stripe session failed (HTTP ' . $httpCode . '): ' . ($response ?: 'no response')),
+                    'stripe_checkout'
+                );
+                flash('error', 'Payment gateway error. Your order is saved — reference: ' . $orderReference . '. Contact support.');
                 redirect(url('orders.php'));
             }
 
-        } catch (Throwable $e) {
-            if (isset($db) && $db->inTransaction()) {
-                $db->rollBack();
+            // Cash on collection
+            flash('success', 'Order placed. Reference: ' . $orderReference . '.');
+            clear_cart();
+            redirect(url('orders.php'));
+
+        } catch (Throwable $exception) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
             }
-            $errors[] = $e->getMessage();
+            log_application_exception($exception, 'checkout');
+            $errors[] = $exception->getMessage() ?: 'We could not place your order. Please try again.';
         }
     }
 }
 
-$pageTitle = 'Secure Checkout';
+$pageTitle = 'Checkout';
 require __DIR__ . '/partials/header.php';
 ?>
-
 <section class="section">
-    <div class="container checkout-layout">
+    <div class="container cart-layout">
         <div class="panel">
             <div class="section-heading">
                 <div>
-                    <span class="eyebrow">Fulfillment</span>
+                    <span class="eyebrow">Checkout</span>
                     <h1>Complete your order</h1>
                 </div>
             </div>
@@ -172,72 +248,57 @@ require __DIR__ . '/partials/header.php';
                 <div class="flash flash-error"><?= e(implode(' ', $errors)) ?></div>
             <?php endif; ?>
 
-            <form class="stack-form" method="post">
+            <form class="stack-form" method="post" id="checkout-form">
                 <?= csrf_field() ?>
-
                 <label>
                     Delivery method
                     <select name="delivery_method" id="delivery_method" required>
-                        <option value="pickup" <?= $deliveryMethod === 'pickup' ? 'selected' : '' ?>>Community Pickup Point (Free)</option>
-                        <option value="courier" <?= $deliveryMethod === 'courier' ? 'selected' : '' ?>>Local Courier Service</option>
+                        <option value="">Choose one</option>
+                        <option value="pickup" <?= $deliveryMethod === 'pickup' ? 'selected' : '' ?>>Community pickup</option>
+                        <option value="courier" <?= $deliveryMethod === 'courier' ? 'selected' : '' ?>>Courier delivery</option>
                     </select>
                 </label>
-
-                <div id="address_section" style="display: <?= $deliveryMethod === 'courier' ? 'block' : 'none' ?>;">
+                <div id="address-wrap" style="display:<?= $deliveryMethod === 'courier' ? 'block' : 'none' ?>">
                     <label>
                         Delivery address
-                        <input type="text" name="delivery_address" value="<?= e($deliveryAddress) ?>" placeholder="Street name, house number, township area">
+                        <textarea name="delivery_address" rows="3" placeholder="Street address, suburb, township"><?= e($deliveryAddress) ?></textarea>
                     </label>
                 </div>
-
                 <label>
-                    Payment strategy
-                    <select name="payment_method" id="payment_method" required>
+                    Payment method
+                    <select name="payment_method" required>
+                        <option value="">Choose one</option>
+                        <option value="stripe" <?= $paymentMethod === 'stripe' ? 'selected' : '' ?>>Pay by card (Stripe)</option>
                         <option value="cash_on_collection" <?= $paymentMethod === 'cash_on_collection' ? 'selected' : '' ?>>Cash on collection</option>
-                        <option value="stripe" <?= $paymentMethod === 'stripe' ? 'selected' : '' ?>>Pay securely with card (Stripe)</option>
                     </select>
                 </label>
-
+                <small style="color:var(--muted)">Card payments are processed securely by Stripe. You will be redirected to complete payment.</small>
                 <button class="button" type="submit">Place order</button>
             </form>
         </div>
 
         <aside class="summary-card">
-            <h2>Order review</h2>
+            <h2>Order summary</h2>
             <?php foreach ($totals['rows'] as $row): ?>
                 <div class="summary-line">
-                    <span><?= e($row['title']) ?> (x<?= e((string)$row['quantity']) ?>)</span>
-                    <strong><?= e(format_currency((float)$row['subtotal'])) ?></strong>
+                    <span><?= e($row['title']) ?> ×<?= e((string) $row['quantity']) ?></span>
+                    <strong><?= e(format_currency((float) $row['subtotal'])) ?></strong>
                 </div>
             <?php endforeach; ?>
             <div class="summary-line">
-                <span>Base Delivery</span>
-                <strong><?= $totals['delivery'] > 0 ? e(format_currency((float)$totals['delivery'])) : 'Free' ?></strong>
+                <span>Delivery</span>
+                <strong><?= $totals['delivery'] > 0 ? e(format_currency((float) $totals['delivery'])) : 'Free' ?></strong>
             </div>
             <div class="summary-line summary-total">
-                <span>Total Due</span>
-                <strong><?= e(format_currency((float)$totals['total'])) ?></strong>
+                <span>Total</span>
+                <strong><?= e(format_currency((float) $totals['total'])) ?></strong>
             </div>
         </aside>
     </div>
 </section>
-
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-    const deliveryMethod = document.getElementById('delivery_method');
-    const addressSection = document.getElementById('address_section');
-
-    function toggleFields() {
-        if (deliveryMethod) {
-            addressSection.style.display = (deliveryMethod.value === 'courier') ? 'block' : 'none';
-        }
-    }
-
-    if (deliveryMethod) {
-        deliveryMethod.addEventListener('change', toggleFields);
-    }
-    toggleFields();
+document.getElementById('delivery_method').addEventListener('change', function () {
+    document.getElementById('address-wrap').style.display = this.value === 'courier' ? 'block' : 'none';
 });
 </script>
-
 <?php require __DIR__ . '/partials/footer.php'; ?>
